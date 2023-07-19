@@ -4,11 +4,18 @@ import org.json.simple.JSONArray;
 import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
 import org.json.simple.parser.ParseException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
+import zerobase.weather.WeatherApplication;
+import zerobase.weather.domain.DateWeather;
 import zerobase.weather.domain.Diary;
+import zerobase.weather.error.InvalidDate;
+import zerobase.weather.repository.DateWeatherRepository;
 import zerobase.weather.repository.DiaryRepository;
 
 import java.io.BufferedReader;
@@ -28,31 +35,68 @@ public class DiaryService {
     private String apiKey; // apiKey 라는 객체에다가 넣어주겠다.
 
     private final DiaryRepository diaryRepository;// bean 생성될 때 diaryRepository 가져옴.
+    private final DateWeatherRepository dateWeatherRepository;
 
-    public DiaryService(DiaryRepository diaryRepository) {
+    private static final Logger logger = LoggerFactory.getLogger(WeatherApplication.class); // 어떤 클래스에서 로거를 가져올 것이냐
+
+    public DiaryService(DiaryRepository diaryRepository, DateWeatherRepository dateWeatherRepository) {
         this.diaryRepository = diaryRepository;
+        this.dateWeatherRepository = dateWeatherRepository;
+    }
+
+    @Transactional
+    @Scheduled(cron = "0 0 1 * * *") // 매일 새벽 한 시마다 이 함수 동작
+    public void saveWeatherDate() {
+        logger.info("오늘 날씨 데이터 잘 가져옴.");
+        dateWeatherRepository.save(getWeatherFromApi()); // 매일 새벽에 Api로부터 날씨 가져옴.
     }
 
     @Transactional(isolation = Isolation.SERIALIZABLE)
     public void createDiary(LocalDate date, String text) {
+        logger.info("started to create diary");
+        // 날씨 데이터 가져오기 (API에서 가져오기 or DB에서 가져오기)
+        DateWeather dateWeather = getDateWeather(date);
+
+        //일기 값 우리 db에 넣기
+        Diary nowDiary = new Diary();
+        nowDiary.setDateWeather(dateWeather);
+        nowDiary.setText(text);
+        diaryRepository.save(nowDiary);
+        logger.info("end to create diary");
+    }
+
+    private DateWeather getWeatherFromApi() {
         // open weather map에서 날씨 데이터 가져오기
         String weatherData = getWeatherString();
 
         // 받아온 날씨 json 파싱하기
         Map<String, Object> parseWeather = parseWeather(weatherData);
+        // 파싱한 날씨 dateWeather 객체에 넣어주기
+        DateWeather dateWeather = new DateWeather();
+        dateWeather.setDate(LocalDate.now());
+        dateWeather.setWeather(parseWeather.get("main").toString());
+        dateWeather.setIcon(parseWeather.get("icon").toString());
+        dateWeather.setTemperature((Double) parseWeather.get("temp"));
+        return dateWeather;
+    }
 
-        // 파싱된 데이터 + 일기 값 우리 db에 넣기
-        Diary nowDiary = new Diary();
-        nowDiary.setWeather(parseWeather.get("main").toString());
-        nowDiary.setIcon(parseWeather.get("icon").toString());
-        nowDiary.setTemperature((Double) parseWeather.get("temp"));
-        nowDiary.setText(text);
-        nowDiary.setDate(date);
-        diaryRepository.save(nowDiary);
+    private DateWeather getDateWeather(LocalDate date) {
+        List<DateWeather> dateWeatherFromDB = dateWeatherRepository.findAllByDate(date);
+        if (dateWeatherFromDB.size() == 0) { // DB에 저장된 날씨 없는 경우
+            // 새로 api에서 날씨 정보 가져와야 함.
+            // 정책상, 현재 날씨를 가져오도록 하거나, 날씨없이 일기를 쓰도록.
+            return getWeatherFromApi();
+        } else { // DB에 저장된 날씨 있는 경우
+            return dateWeatherFromDB.get(0);
+        }
     }
 
     @Transactional(readOnly = true)
     public List<Diary> readDiary(LocalDate date) {
+      //  if (date.isAfter(LocalDate.ofYearDay(3050, 1))) {
+        //    throw new InvalidDate();
+      //  }
+        logger.debug("read diary");
         return diaryRepository.findAllByDate(date);
     }
     public List<Diary> readDiaries(LocalDate startDate, LocalDate endDate) {
